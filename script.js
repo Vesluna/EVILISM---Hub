@@ -5,7 +5,7 @@
 // Configuration
 const CONFIG = {
     DISCORD_CLIENT_ID: '1502178686705860698',
-    REDIRECT_URI: window.location.origin + window.location.pathname,
+    BACKEND_URL: 'https://evilism-bot-production.up.railway.app',
     GUILD_ID: '1502137521491153037',
     ROLE_HIERARCHY: {
         'umbra': 5,
@@ -35,7 +35,6 @@ const app = {
     init() {
         this.loadState();
         this.updateUI();
-        this.handleOAuthCallback();
     },
 
     // Load state from localStorage
@@ -62,7 +61,7 @@ const app = {
         
         const params = new URLSearchParams({
             client_id: CONFIG.DISCORD_CLIENT_ID,
-            redirect_uri: CONFIG.REDIRECT_URI,
+            redirect_uri: `${CONFIG.BACKEND_URL}/api/hub/auth/callback`,
             response_type: 'code',
             scope: 'identify guilds',
             state: state
@@ -73,36 +72,67 @@ const app = {
 
     // Generate random state for OAuth
     generateState() {
-        const arr = new Uint8Array(16);
-        crypto.getRandomValues(arr);
-        return Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
+        try {
+            const arr = new Uint8Array(16);
+            crypto.getRandomValues(arr);
+            return Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
+        } catch (e) {
+            // Fallback for environments without crypto
+            return Math.random().toString(36).substr(2, 16);
+        }
     },
 
     // Handle OAuth Callback
     handleOAuthCallback() {
         const params = new URLSearchParams(window.location.search);
-        const code = params.get('code');
-        const state = params.get('state');
-        const savedState = sessionStorage.getItem('oauth_state');
+        const token = params.get('token');
+        const error = params.get('error');
 
-        if (!code || state !== savedState) {
+        if (error) {
+            console.error('OAuth error:', error);
+            alert('Login failed: ' + error);
             return;
         }
 
-        // Simulate successful login (in production, exchange code for token with backend)
-        this.state.token = 'mock-token-' + Date.now();
-        this.state.user = {
-            id: 'user-' + Math.random().toString(36).substr(2, 9),
-            username: 'Member',
-            avatar: 'https://cdn.discordapp.com/embed/avatars/0.png'
-        };
-        this.state.userRole = 'Acolytes of Evil';
-        this.state.userRankTier = CONFIG.ROLE_HIERARCHY[this.state.userRole] || 0;
+        if (!token) {
+            return;
+        }
 
-        this.saveState();
-        this.updateUI();
+        // Store token and fetch user info
+        this.state.token = token;
+        this.fetchUserInfo();
         window.history.replaceState({}, document.title, window.location.pathname);
-        showSection('portal');
+    },
+
+    // Fetch user info from backend
+    async fetchUserInfo() {
+        try {
+            const response = await fetch(`${CONFIG.BACKEND_URL}/api/hub/me`, {
+                headers: {
+                    'Authorization': `Bearer ${this.state.token}`
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to fetch user info');
+            }
+
+            const data = await response.json();
+            this.state.user = {
+                id: data.id,
+                username: data.username,
+                avatar: data.avatar ? `https://cdn.discordapp.com/avatars/${data.id}/${data.avatar}.png` : 'https://cdn.discordapp.com/embed/avatars/0.png'
+            };
+            this.state.userRole = data.role || 'Acolytes of Evil';
+            this.state.userRankTier = data.tier || 1;
+
+            this.saveState();
+            this.updateUI();
+            showSection('portal');
+        } catch (error) {
+            console.error('Error fetching user info:', error);
+            alert('Failed to load user information. Please try logging in again.');
+        }
     },
 
     // Update UI based on auth state
@@ -110,7 +140,7 @@ const app = {
         const authContainer = document.getElementById('auth-container');
         const portalLink = document.getElementById('portal-link');
 
-        if (this.state.user) {
+        if (this.state.user && this.state.token) {
             authContainer.innerHTML = `
                 <div style="display: flex; align-items: center; gap: 1rem;">
                     <span style="color: var(--text-secondary);">${this.escapeHtml(this.state.user.username)}</span>
@@ -144,7 +174,7 @@ const app = {
     },
 
     // Logout
-    logout() {
+    async logout() {
         this.state = {
             user: null,
             token: null,
@@ -529,4 +559,10 @@ function showSection(sectionId) {
 }
 
 // Initialize on page load
-window.addEventListener('DOMContentLoaded', () => app.init());
+window.addEventListener('DOMContentLoaded', () => {
+    app.init();
+    // Check if we're returning from OAuth callback
+    if (window.location.search.includes('token=') || window.location.search.includes('error=')) {
+        app.handleOAuthCallback();
+    }
+});
